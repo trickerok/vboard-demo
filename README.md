@@ -1,56 +1,103 @@
 # STEMBoard
 
-A real-time collaborative whiteboard designed for STEM education and brainstorming. It supports multiple users working on the same canvas seamlessly using WebSockets, featuring a rich set of drawing and mathematical tools.
+Интерактивная доска для совместной работы в реальном времени, созданная специально для STEM-образования (наука, технологии, инженерия и математика).
 
-## Features
+## 🛠 Технологический стек (Что используется в проекте)
 
-- **Real-Time Collaboration**: Work together with remote cursors using Socket.io.
-- **Rich Shape Tools**: Draw freehand, squares, circles, triangles, and polygons.
-- **Mathematical Text & Markdown**: Insert rich text that automatically parses Markdown and LaTeX/KaTeX (e.g. `$$ E=mc^2 $$`) into beautiful math equations.
-- **Smart Group Selection**: Drag multiple objects at once, select via lasso, or click anywhere inside a group bounding box to move it.
-- **High-Quality Export**: Export your whiteboard to high-resolution JPEG or PDF while preserving the canvas background and grid patterns.
-- **Configurable Canvas**: Toggle between White, Paper, or Gray backgrounds, and activate Dots or Grid patterns with adjustable scaling.
-- **Infinite Space Pan**: Pan around the infinite canvas using the Pan tool or by holding the spacebar.
+Проект представляет собой Full-stack приложение:
 
-## Project Structure
+*   **Frontend (Клиент):**
+    *   **React 19 & Vite** — современный и быстрый фреймворк для создания пользовательских интерфейсов.
+    *   **Konva & React-Konva** — мощный движок для работы с 2D Canvas (отвечает за отрисовку линий, фигур, выделений).
+    *   **Tailwind CSS** — утилитарный CSS-фреймворк для стилизации интерфейса (панели инструментов, меню).
+    *   **Socket.io-client** — клиентская часть для обмена событиями в реальном времени.
+    *   **React Markdown & KaTeX** — парсинг Markdown и рендеринг математических формул (LaTeX) поверх холста.
+    *   **Perfect Freehand** — алгоритм для сглаживания рисуемых от руки линий (эффект кисти).
+    *   **jsPDF & html2canvas** — инструменты для экспорта доски в PDF и сохранения изображений.
+*   **Backend (Сервер):**
+    *   **Node.js & Express** — веб-сервер для раздачи статических файлов в production и маршрутизации.
+    *   **Socket.io** — WebSocket-сервер для синхронизации курсоров, перемещения объектов и рисования между множеством пользователей.
+    *   **Firebase (Firestore)** — облачная база данных для постоянного хранения созданных комнат и элементов на доске (при необходимости).
 
-The codebase is organized cleanly to separate concerns:
+## 🔒 Аудит безопасности
 
-- `src/components/`
-  - `Canvas.tsx`: The core canvas engine built with `react-konva`. Handles rendering, event routing, real-time cursor syncing, drawing logic, and exports.
-  - `TextNode.tsx`: A specialized component for rendering Markdown and KaTeX math formulas within the Konva stage using HTML overlays.
-- `src/pages/`
-  - `Room.tsx`: The workspace wrapper that manages Socket.io connections, room state, toolbars, and background settings.
-- `src/lib/`
-  - `firebase.ts`: Configuration for Firebase, used for long-term data persistence.
-  - `freehand.ts`: Utility for generating SVG paths from `perfect-freehand` strokes for smooth drawing.
-- `server.ts`: The Express/Socket.io backend server that routes real-time events between users.
+В текущей версии проекта есть несколько мест, на которые стоит обратить внимание перед развертыванием в масштабный **production**:
 
-## Deployment
+1.  **Правила Firestore (`firestore.rules`)**
+    *   *Текущее состояние:* `allow read, write: if true;`
+    *   *Риск:* Любой пользователь интернета может читать и изменять данные в вашей базе.
+    *   *Решение:* Рекомендуется добавить Firebase Authentication и ограничить доступ (например, `if request.auth != null`), либо проверять принадлежность пользователя к комнате.
+2.  **CORS в Socket.io (`server.ts`)**
+    *   *Текущее состояние:* `origin: "*"`
+    *   *Риск:* Сторонние сайты могут подключаться к вашему WebSocket-серверу.
+    *   *Решение:* В production замените `*` на конкретный домен вашего сайта (например, `https://my-board.com`).
+3.  **XSS (Межсайтовый скриптинг)**
+    *   *Текущее состояние:* Безопасно. Текстовые блоки обрабатываются через `react-markdown`, который по умолчанию экранирует опасные HTML-теги, `dangerouslySetInnerHTML` не используется.
+4.  **Утечка API-ключей**
+    *   *Текущее состояние:* Безопасно. Ключи окружения (например, Gemini или админские токены) не вшиты в клиентский код. Конфигурация Firebase использует публичные идентификаторы, что является нормой.
 
-The application consists of a Vite React frontend and an Express Socket.io backend. It can be deployed as a single full-stack Node.js application.
+## 🚀 Инструкция по локальному запуску
 
-1. **Build the Application:**
-   Run the build script to compile the frontend and bundle the backend server:
-   \`\`\`bash
-   npm run build
-   \`\`\`
-   This will output a standalone \`dist/server.cjs\` file and the compiled frontend assets in the \`dist/\` folder.
+1. Установите зависимости:
+   ```bash
+   npm install
+   ```
+2. Запустите режим разработки (клиент + WebSocket сервер на порту 3000):
+   ```bash
+   npm run dev
+   ```
 
-2. **Start the Production Server:**
-   Launch the compiled server:
-   \`\`\`bash
+## 📦 Инструкция по публикации и деплою
+
+Приложение подготовлено к сборке в единый контейнер/сервер. Серверный код (Express) компилируется вместе с клиентом в папку `dist`.
+
+### Шаг 1: Сборка проекта
+Для создания оптимизированной production-версии выполните:
+```bash
+npm run build
+```
+Эта команда создаст:
+*   `dist/` — папку со статическими файлами клиентского приложения (ваши HTML, JS, CSS).
+*   `dist/server.cjs` — скомпилированный бэкенд со встроенным Express и Socket.io сервером.
+
+### Шаг 2: Тестирование собранной версии
+```bash
+npm start
+```
+Сервер запустится на порту `3000` (порт можно изменить, задав переменную окружения `PORT`).
+
+### Шаг 3: Деплой на хостинг (на примере Google Cloud Run, Heroku или Render)
+
+Проект идеально подходит для хостингов, поддерживающих Docker или Node.js-окружения:
+
+**Вариант А: Деплой на Node.js хостинги (Render, Heroku, Railway)**
+1. Подключите ваш GitHub репозиторий к хостингу.
+2. Укажите команду для сборки (Build Command):
+   ```bash
+   npm install && npm run build
+   ```
+3. Укажите команду для запуска (Start Command):
+   ```bash
    npm start
-   \`\`\`
-   The application will run on port 3000 by default (configurable via the \`PORT\` environment variable).
+   ```
+4. Убедитесь, что хостинг поддерживает WebSockets (обычно включено по умолчанию).
 
-3. **Deploying to Cloud Providers:**
-   You can deploy this repository to services like Google Cloud Run, Heroku, or Render. Make sure the hosting service supports WebSockets.
-
-## Development
-
-To start the development server with live reload:
-
-\`\`\`bash
-npm run dev
-\`\`\`
+**Вариант Б: Деплой через Docker (Google Cloud Run / VPS)**
+Если вы хотите упаковать приложение в Docker, создайте `Dockerfile` в корне проекта:
+```dockerfile
+FROM node:22-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+ENV NODE_ENV=production
+ENV PORT=3000
+EXPOSE 3000
+CMD ["npm", "start"]
+```
+После чего соберите и запустите образ:
+```bash
+docker build -t stemboard .
+docker run -p 3000:3000 stemboard
+```
