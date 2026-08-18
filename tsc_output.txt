@@ -1,5 +1,0 @@
-src/components/Canvas.tsx(42,7): error TS2448: Block-scoped variable 'selectedIds' used before its declaration.
-src/components/Canvas.tsx(283,38): error TS2367: This comparison appears to be unintentional because the types '"polygon"' and '"select-lasso"' have no overlap.
-src/components/Canvas.tsx(364,70): error TS2304: Cannot find name 'getStroke'.
-src/components/Canvas.tsx(385,60): error TS2367: This comparison appears to be unintentional because the types '"rect" | "draw" | "text" | "eraser" | "pan" | "polygon"' and '"select-lasso"' have no overlap.
-src/components/Canvas.tsx(635,490): error TS17001: JSX elements cannot have multiple attributes with the same name.
