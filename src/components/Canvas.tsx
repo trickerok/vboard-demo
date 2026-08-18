@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { Stage, Layer, Rect, Path, Group, Line, Transformer, Circle, RegularPolygon } from 'react-konva';
+import { Stage, Layer, Rect, Path, Group, Line, Transformer, Circle as KonvaCircle, RegularPolygon } from 'react-konva';
 import { v4 as uuidv4 } from 'uuid';
 import { Socket } from 'socket.io-client';
 import { CanvasObject, CanvasEvent } from '../types';
@@ -32,6 +32,7 @@ interface CanvasProps {
   roomId: string;
   bgPattern?: 'none' | 'grid' | 'dots';
   bgColor?: 'white' | 'paper' | 'gray';
+  gridSize?: number;
   localUserId: string;
   localUserName: string;
   localUserColor: string;
@@ -40,7 +41,7 @@ interface CanvasProps {
 const COLORS = ['#000000', '#ef4444', '#3b82f6', '#22c55e', '#eab308'];
 const SIZES = [4, 8, 12, 16];
 
-export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', localUserId, localUserName, localUserColor }: CanvasProps) {
+export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', gridSize = 40, localUserId, localUserName, localUserColor }: CanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const trRef = useRef<any>(null);
 
@@ -168,9 +169,9 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
       
     containerRef.current.style.backgroundColor = bgColorValue;
     containerRef.current.style.backgroundImage = bgImage;
-    containerRef.current.style.backgroundSize = bgPattern === 'grid' ? `${40 * scaleX}px ${40 * scaleY}px` : bgPattern === 'dots' ? `${40 * scaleX}px ${40 * scaleY}px` : 'auto';
+    containerRef.current.style.backgroundSize = bgPattern === 'grid' ? `${gridSize * scaleX}px ${gridSize * scaleY}px` : bgPattern === 'dots' ? `${gridSize * scaleX}px ${gridSize * scaleY}px` : 'auto';
     containerRef.current.style.backgroundPosition = `${x}px ${y}px`;
-  }, [bgPattern, bgColor, dimensions]);
+  }, [bgPattern, bgColor, dimensions, gridSize]);
   
   // We need to update background position / size on pan and zoom!
   const updateBg = (stage: any) => {
@@ -181,7 +182,7 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
     
     containerRef.current.style.backgroundImage = bgImage;
     if (bgPattern !== 'none') {
-        containerRef.current.style.backgroundSize = `${40 * stage.scaleX()}px ${40 * stage.scaleY()}px`;
+        containerRef.current.style.backgroundSize = `${gridSize * stage.scaleX()}px ${gridSize * stage.scaleY()}px`;
         containerRef.current.style.backgroundPosition = `${stage.x()}px ${stage.y()}px`;
     }
   };
@@ -858,41 +859,205 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
     });
   };
 
-  const exportToJPG = () => {
-    if (!trRef.current) return;
-    const stage = trRef.current.getStage();
-    if (!stage) return;
-    
-    // Save original position & scale to restore later
-    const oldScale = stage.scaleX();
-    const oldPos = stage.position();
-    
-    const dataURL = stage.toDataURL({ pixelRatio: 2, mimeType: 'image/jpeg', backgroundColor: bgColor === 'paper' ? '#fdfbf7' : bgColor === 'gray' ? '#f3f4f6' : '#ffffff' });
-    
-    const link = document.createElement('a');
-    link.download = `stemboard-${roomId}.jpg`;
-    link.href = dataURL;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const getSelectionBoundingBox = () => {
+    if (selectedIds.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const targetObjects = objects.filter(o => selectedIds.includes(o.id));
+    if (targetObjects.length === 0) return null;
+
+    targetObjects.forEach(obj => {
+       if (obj.type === 'rect') {
+          minX = Math.min(minX, obj.x);
+          minY = Math.min(minY, obj.y);
+          maxX = Math.max(maxX, obj.x + (obj.width || 0));
+          maxY = Math.max(maxY, obj.y + (obj.height || 0));
+       } else if (obj.type === 'circle' || obj.type === 'triangle' || (obj.type === 'polygon' && obj.radius)) {
+          minX = Math.min(minX, obj.x - (obj.radius || 0));
+          minY = Math.min(minY, obj.y - (obj.radius || 0));
+          maxX = Math.max(maxX, obj.x + (obj.radius || 0));
+          maxY = Math.max(maxY, obj.y + (obj.radius || 0));
+       } else if (obj.type === 'text') {
+          minX = Math.min(minX, obj.x);
+          minY = Math.min(minY, obj.y);
+          maxX = Math.max(maxX, obj.x + 300);
+          maxY = Math.max(maxY, obj.y + 100);
+       } else if (obj.type === 'path' || obj.type === 'polygon') {
+          obj.points.forEach((p: any) => {
+             const px = (p.x !== undefined ? p.x : (Array.isArray(p) ? p[0] : p)) + (obj.x || 0);
+             const py = (p.y !== undefined ? p.y : (Array.isArray(p) ? p[1] : p)) + (obj.y || 0);
+             minX = Math.min(minX, px);
+             minY = Math.min(minY, py);
+             maxX = Math.max(maxX, px);
+             maxY = Math.max(maxY, py);
+          });
+       }
+    });
+
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
   };
 
-  const exportToPDF = () => {
+  const selectedBBox = getSelectionBoundingBox();
+
+  const getBoundingBox = () => {
+    const stage = trRef.current?.getStage();
+    if (!stage) return null;
+    
+    // Let's get the bounding box of selected objects if any, else all objects
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const targetObjects = selectedIds.length > 0 
+      ? objects.filter(o => selectedIds.includes(o.id))
+      : objects;
+      
+    if (targetObjects.length === 0) return null;
+
+    targetObjects.forEach(obj => {
+       if (obj.type === 'rect') {
+          minX = Math.min(minX, obj.x);
+          minY = Math.min(minY, obj.y);
+          maxX = Math.max(maxX, obj.x + (obj.width || 0));
+          maxY = Math.max(maxY, obj.y + (obj.height || 0));
+       } else if (obj.type === 'circle' || obj.type === 'triangle' || (obj.type === 'polygon' && obj.radius)) {
+          minX = Math.min(minX, obj.x - (obj.radius || 0));
+          minY = Math.min(minY, obj.y - (obj.radius || 0));
+          maxX = Math.max(maxX, obj.x + (obj.radius || 0));
+          maxY = Math.max(maxY, obj.y + (obj.radius || 0));
+       } else if (obj.type === 'text') {
+          minX = Math.min(minX, obj.x);
+          minY = Math.min(minY, obj.y);
+          maxX = Math.max(maxX, obj.x + 300);
+          maxY = Math.max(maxY, obj.y + 100);
+       } else if (obj.type === 'path' || obj.type === 'polygon') {
+          obj.points.forEach((p: any) => {
+             const px = (p.x !== undefined ? p.x : (Array.isArray(p) ? p[0] : p)) + (obj.x || 0);
+             const py = (p.y !== undefined ? p.y : (Array.isArray(p) ? p[1] : p)) + (obj.y || 0);
+             minX = Math.min(minX, px);
+             minY = Math.min(minY, py);
+             maxX = Math.max(maxX, px);
+             maxY = Math.max(maxY, py);
+          });
+       }
+    });
+    
+    // Add some padding
+    const padding = 20;
+    return {
+      x: minX - padding,
+      y: minY - padding,
+      width: (maxX - minX) + padding * 2,
+      height: (maxY - minY) + padding * 2
+    };
+  };
+
+  const exportWithBackground = async (format: 'jpg' | 'pdf') => {
     if (!trRef.current) return;
     const stage = trRef.current.getStage();
     if (!stage) return;
     
-    const dataURL = stage.toDataURL({ pixelRatio: 2, mimeType: 'image/jpeg', backgroundColor: bgColor === 'paper' ? '#fdfbf7' : bgColor === 'gray' ? '#f3f4f6' : '#ffffff' });
+    // Hide selections to avoid exporting glowing bounding boxes
+    const oldSelectedIds = selectedIds;
+    setSelectedIds([]);
+    await new Promise(r => setTimeout(r, 50));
     
-    const pdf = new jsPDF({
-      orientation: stage.width() > stage.height() ? 'landscape' : 'portrait',
-      unit: 'px',
-      format: [stage.width(), stage.height()]
+    const bbox = getBoundingBox();
+    const pixelRatio = 4; // High Quality Export
+    
+    const exportX = bbox ? bbox.x * stage.scaleX() + stage.x() : 0;
+    const exportY = bbox ? bbox.y * stage.scaleY() + stage.y() : 0;
+    const exportWidth = bbox ? bbox.width * stage.scaleX() : stage.width();
+    const exportHeight = bbox ? bbox.height * stage.scaleY() : stage.height();
+
+    const canvas = document.createElement('canvas');
+    canvas.width = exportWidth * pixelRatio;
+    canvas.height = exportHeight * pixelRatio;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+       setSelectedIds(oldSelectedIds);
+       return;
+    }
+    
+    // Fill background color
+    ctx.fillStyle = bgColor === 'paper' ? '#fdfbf7' : bgColor === 'gray' ? '#f3f4f6' : '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw pattern
+    if (bgPattern !== 'none') {
+       ctx.strokeStyle = bgPattern === 'grid' ? 'rgba(0,0,0,0.06)' : 'transparent';
+       ctx.fillStyle = bgPattern === 'dots' ? 'rgba(0,0,0,0.12)' : 'transparent';
+       ctx.lineWidth = 1 * pixelRatio;
+       
+       const scaledGridSize = gridSize * stage.scaleX() * pixelRatio;
+       const offsetX = (stage.x() * pixelRatio) - (exportX * pixelRatio);
+       const offsetY = (stage.y() * pixelRatio) - (exportY * pixelRatio);
+       
+       let startX = offsetX % scaledGridSize;
+       let startY = offsetY % scaledGridSize;
+       if (startX > 0) startX -= scaledGridSize;
+       if (startY > 0) startY -= scaledGridSize;
+       
+       if (bgPattern === 'grid') {
+          ctx.beginPath();
+          for (let x = startX; x < canvas.width; x += scaledGridSize) {
+             ctx.moveTo(x, 0);
+             ctx.lineTo(x, canvas.height);
+          }
+          for (let y = startY; y < canvas.height; y += scaledGridSize) {
+             ctx.moveTo(0, y);
+             ctx.lineTo(canvas.width, y);
+          }
+          ctx.stroke();
+       } else if (bgPattern === 'dots') {
+          for (let x = startX; x < canvas.width; x += scaledGridSize) {
+             for (let y = startY; y < canvas.height; y += scaledGridSize) {
+                ctx.beginPath();
+                ctx.arc(x, y, 1.5 * pixelRatio, 0, Math.PI * 2);
+                ctx.fill();
+             }
+          }
+       }
+    }
+    
+    // Get Konva stage data (without background to let it be transparent, but wait, if it's transparent jpeg it becomes black. We must use png)
+    const stageDataURL = stage.toDataURL({
+      pixelRatio,
+      mimeType: 'image/png',
+      x: bbox ? bbox.x * stage.scaleX() + stage.x() : undefined,
+      y: bbox ? bbox.y * stage.scaleY() + stage.y() : undefined,
+      width: bbox ? bbox.width * stage.scaleX() : undefined,
+      height: bbox ? bbox.height * stage.scaleY() : undefined
     });
     
-    pdf.addImage(dataURL, 'JPEG', 0, 0, stage.width(), stage.height());
-    pdf.save(`stemboard-${roomId}.pdf`);
+    const img = new Image();
+    img.src = stageDataURL;
+    await new Promise(r => { img.onload = r; });
+    
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    
+    const finalDataURL = canvas.toDataURL('image/jpeg', 1.0);
+    
+    if (format === 'jpg') {
+       const link = document.createElement('a');
+       link.download = `stemboard-${roomId}.jpg`;
+       link.href = finalDataURL;
+       document.body.appendChild(link);
+       link.click();
+       document.body.removeChild(link);
+    } else {
+       const pdfWidth = bbox ? bbox.width : stage.width();
+       const pdfHeight = bbox ? bbox.height : stage.height();
+       const pdf = new jsPDF({
+         orientation: pdfWidth > pdfHeight ? 'landscape' : 'portrait',
+         unit: 'px',
+         format: [pdfWidth, pdfHeight]
+       });
+       pdf.addImage(finalDataURL, 'JPEG', 0, 0, pdfWidth, pdfHeight);
+       pdf.save(`stemboard-${roomId}.pdf`);
+    }
+    
+    setSelectedIds(oldSelectedIds);
   };
+
+  const exportToJPG = () => exportWithBackground('jpg');
+  const exportToPDF = () => exportWithBackground('pdf');
 
   return (
     <div ref={containerRef} onContextMenu={(e) => e.preventDefault()} className="h-full w-full relative outline-none overflow-hidden transition-colors duration-300">
@@ -901,10 +1066,13 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
         <button onClick={handleRedo} disabled={redoStack.current.length === 0} className={cn("p-2 rounded-lg transition-colors", redoStack.current.length === 0 ? "text-zinc-300 cursor-not-allowed" : "text-zinc-500 hover:bg-zinc-100")} title="Redo (Ctrl+Shift+Z)"><Redo2 size={20} /></button>
       </div>
       
-      <div className="absolute top-4 right-4 z-50 flex items-center gap-1 p-1 bg-white rounded-xl shadow-md border border-zinc-200 pointer-events-auto">
-        <button onClick={exportToJPG} className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium text-zinc-600 hover:bg-zinc-100" title="Export JPG"><Download size={16} /> JPG</button>
-        <div className="w-px h-4 bg-zinc-200" />
-        <button onClick={exportToPDF} className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium text-zinc-600 hover:bg-zinc-100" title="Export PDF"><Download size={16} /> PDF</button>
+      <div className="absolute top-4 right-4 z-50 flex flex-col gap-2 pointer-events-auto items-end">
+         <div className="flex items-center gap-1 p-1 bg-white rounded-xl shadow-md border border-zinc-200">
+           <button onClick={exportToJPG} className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium text-zinc-600 hover:bg-zinc-100" title="Export JPG"><Download size={16} /> JPG</button>
+           <div className="w-px h-4 bg-zinc-200" />
+           <button onClick={exportToPDF} className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium text-zinc-600 hover:bg-zinc-100" title="Export PDF"><Download size={16} /> PDF</button>
+         </div>
+
       </div>
       <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 pointer-events-auto">
         <div className="flex items-center gap-1 p-1 bg-white rounded-xl shadow-md border border-zinc-200">
@@ -915,35 +1083,22 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
           <button onClick={() => setTool('text')} className={cn("p-2 rounded-lg transition-colors", tool === 'text' ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} title="Text/Math/Code (Markdown)"><Type size={20} /></button>
           <button onClick={() => setTool('eraser')} className={cn("p-2 rounded-lg transition-colors", tool === 'eraser' ? "bg-rose-100 text-rose-700" : "text-zinc-500 hover:bg-zinc-100")} title="Eraser"><Eraser size={20} /></button>
           <div className="w-px h-6 bg-zinc-200 mx-1" />
-          <div className="relative">
-            <button 
-              onClick={() => {
-                if (['rect', 'circle', 'triangle', 'polygon'].includes(tool)) {
-                  setShowShapeMenu(!showShapeMenu);
-                } else {
-                  setTool('rect');
-                  setShowShapeMenu(true);
-                }
-              }} 
-              className={cn("p-2 rounded-lg transition-colors flex items-center gap-1", ['rect', 'circle', 'triangle', 'polygon'].includes(tool) ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} 
-              title="Shapes"
-            >
-              {tool === 'circle' ? <Circle size={20} /> : tool === 'triangle' ? <Triangle size={20} /> : tool === 'polygon' ? <Hexagon size={20} /> : <Square size={20} />}
-            </button>
-            {showShapeMenu && (
-              <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 bg-white rounded-xl shadow-xl border border-zinc-200 p-1 flex gap-1 z-50">
-                <button onClick={() => { setTool('rect'); setShowShapeMenu(false); }} className={cn("p-2 rounded-lg transition-colors", tool === 'rect' ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} title="Square"><Square size={20} /></button>
-                <button onClick={() => { setTool('circle'); setShowShapeMenu(false); }} className={cn("p-2 rounded-lg transition-colors", tool === 'circle' ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} title="Circle"><Circle size={20} /></button>
-                <button onClick={() => { setTool('triangle'); setShowShapeMenu(false); }} className={cn("p-2 rounded-lg transition-colors", tool === 'triangle' ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} title="Triangle"><Triangle size={20} /></button>
-                <button onClick={() => { setTool('polygon'); setShowShapeMenu(false); }} className={cn("p-2 rounded-lg transition-colors", tool === 'polygon' ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} title="Polygon"><Hexagon size={20} /></button>
-              </div>
-            )}
-          </div>
+          <button onClick={() => setTool(tool === 'circle' ? 'circle' : tool === 'triangle' ? 'triangle' : tool === 'polygon' ? 'polygon' : 'rect')} className={cn("p-2 rounded-lg transition-colors", ['rect', 'circle', 'triangle', 'polygon'].includes(tool) ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} title="Shapes">
+            {tool === 'circle' ? <Circle size={20} /> : tool === 'triangle' ? <Triangle size={20} /> : tool === 'polygon' ? <Hexagon size={20} /> : <Square size={20} />}
+          </button>
           {selectedIds.length > 0 && <button onClick={() => { setObjects(prev => prev.filter(o => !selectedIds.includes(o.id))); emitEvent({ type: 'DELETE_OBJECTS', ids: selectedIds }); setSelectedIds([]); }} className="p-2 rounded-lg text-rose-500 hover:bg-rose-50 transition-colors" title="Delete Selected"><Trash2 size={20} /></button>}
         </div>
         
         {(tool === 'draw' || tool === 'rect' || tool === 'circle' || tool === 'triangle' || tool === 'polygon' || selectedIds.length > 0) && (
           <div className="flex items-center gap-2 p-1.5 bg-white rounded-xl shadow-md border border-zinc-200">
+            {['rect', 'circle', 'triangle', 'polygon'].includes(tool) && (
+               <div className="flex items-center gap-1 mr-2 border-r pr-3 border-zinc-200">
+                 <button onClick={() => setTool('rect')} className={cn("p-1.5 rounded-md transition-colors", tool === 'rect' ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} title="Square"><Square size={16} /></button>
+                 <button onClick={() => setTool('circle')} className={cn("p-1.5 rounded-md transition-colors", tool === 'circle' ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} title="Circle"><Circle size={16} /></button>
+                 <button onClick={() => setTool('triangle')} className={cn("p-1.5 rounded-md transition-colors", tool === 'triangle' ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} title="Triangle"><Triangle size={16} /></button>
+                 <button onClick={() => setTool('polygon')} className={cn("p-1.5 rounded-md transition-colors", tool === 'polygon' ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")} title="Polygon"><Hexagon size={16} /></button>
+               </div>
+            )}
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider ml-1 mr-1">Fill:</span>
               {COLORS.map(c => (
@@ -1011,11 +1166,9 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
             {tool === 'draw' && (
               <>
                 <div className="w-px h-4 bg-zinc-200 mx-1" />
-                {SIZES.map(s => (
-                  <button key={s} onClick={() => setBrushSize(s)} className={cn("w-6 h-6 flex items-center justify-center rounded-md", brushSize === s ? "bg-indigo-100 text-indigo-700" : "text-zinc-500 hover:bg-zinc-100")}>
-                    <div className="bg-current rounded-full" style={{ width: s, height: s }} />
-                  </button>
-                ))}
+                <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider ml-1 mr-1">Size:</span>
+                <input type="range" min="1" max="50" value={brushSize} onChange={(e) => setBrushSize(parseInt(e.target.value))} className="w-24 accent-indigo-500" title="Brush Size" />
+                <span className="text-xs text-zinc-500 min-w-[20px]">{brushSize}px</span>
               </>
             )}
           </div>
@@ -1033,11 +1186,9 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
             {eraserMode === 'pixel' && (
               <>
                 <div className="w-px h-4 bg-zinc-200 mx-1" />
-                {SIZES.map(s => (
-                  <button key={s} onClick={() => setBrushSize(s)} className={cn("w-6 h-6 flex items-center justify-center rounded-md", brushSize === s ? "bg-rose-100 text-rose-700" : "text-zinc-500 hover:bg-zinc-100")}>
-                    <div className="bg-current rounded-full" style={{ width: s, height: s }} />
-                  </button>
-                ))}
+                <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider ml-1 mr-1">Size:</span>
+                <input type="range" min="1" max="100" value={brushSize} onChange={(e) => setBrushSize(parseInt(e.target.value))} className="w-24 accent-rose-500" title="Eraser Size" />
+                <span className="text-xs text-zinc-500 min-w-[20px]">{brushSize}px</span>
               </>
             )}
           </div>
@@ -1076,7 +1227,7 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
               } else if (obj.type === 'circle') {
                 const isSelected = selectedIds.includes(obj.id);
                 return (
-                  <Circle key={obj.id} id={obj.id} x={obj.x} y={obj.y} radius={obj.radius} fill={obj.fill} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} shadowColor={isSelected ? "#6366f1" : "rgba(0,0,0,0.15)"} shadowBlur={isSelected ? 10 : 15} shadowOffsetY={isSelected ? 0 : 5} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 0} />
+                  <KonvaCircle key={obj.id} id={obj.id} x={obj.x} y={obj.y} radius={obj.radius} fill={obj.fill} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} shadowColor={isSelected ? "#6366f1" : "rgba(0,0,0,0.15)"} shadowBlur={isSelected ? 10 : 15} shadowOffsetY={isSelected ? 0 : 5} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 0} />
                 );
               } else if (obj.type === 'triangle') {
                 const isSelected = selectedIds.includes(obj.id);
@@ -1147,6 +1298,62 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
             
             {/* Native Lasso Line */}
             <Line ref={lassoLineRef} stroke="#6366f1" strokeWidth={1} fill="rgba(99, 102, 241, 0.1)" closed={true} visible={false} listening={false} points={[]} />
+            {selectedBBox && (tool === 'select' || tool === 'select-lasso') && selectedIds.length > 0 && (
+              <Rect
+                x={selectedBBox.x}
+                y={selectedBBox.y}
+                width={selectedBBox.width}
+                height={selectedBBox.height}
+                fill="transparent"
+                draggable
+                onPointerDown={(e) => {
+                  // Prevent the stage from seeing this click, which would deselect
+                  e.cancelBubble = true;
+                }}
+                onClick={(e) => {
+                  // If they click on the bounding box without dragging, we should clear the selection
+                  // because it feels natural to click empty space to deselect.
+                  // Wait, if they click the box, maybe they just wanted to select the group?
+                  // We'll let them click outside the box to deselect.
+                }}
+                onDragStart={(e) => {
+                  selectedIds.forEach(id => handleDragStart(e, id));
+                }}
+                onDragMove={(e) => {
+                  const dx = e.target.x() - selectedBBox.x;
+                  const dy = e.target.y() - selectedBBox.y;
+                  selectedIds.forEach(targetId => {
+                    if (dragStartPos.current[targetId]) {
+                      const newX = dragStartPos.current[targetId].x + dx;
+                      const newY = dragStartPos.current[targetId].y + dy;
+                      const node = dragStartPos.current[targetId]?.node;
+                      if (node) node.position({ x: newX, y: newY });
+                    }
+                  });
+                }}
+                onDragEnd={(e) => {
+                  const dx = e.target.x() - selectedBBox.x;
+                  const dy = e.target.y() - selectedBBox.y;
+                  
+                  setObjects(prev => {
+                    const next = [...prev];
+                    const updates: Record<string, any> = {};
+                    selectedIds.forEach(id => {
+                      const idx = next.findIndex(o => o.id === id);
+                      if (idx !== -1 && dragStartPos.current[id]) {
+                        next[idx] = { ...next[idx], x: dragStartPos.current[id].x + dx, y: dragStartPos.current[id].y + dy };
+                        updates[id] = { x: next[idx].x, y: next[idx].y };
+                      }
+                    });
+                    emitEvent({ type: 'UPDATE_MULTIPLE', updates });
+                    return next;
+                  });
+                  
+                  // Reset rect position so it matches the newly updated bbox on next render
+                  e.target.position({ x: selectedBBox.x, y: selectedBBox.y });
+                }}
+              />
+            )}
             {/* Polygon Preview Line */}
             <Line ref={polygonLineRef} stroke="transparent" strokeWidth={0} closed={true} visible={false} listening={false} points={[]} opacity={0.7} />
             {(tool === 'select' || tool === 'select-lasso') && <Transformer ref={trRef} boundBoxFunc={(oldBox, newBox) => Math.abs(newBox.width) < 10 || Math.abs(newBox.height) < 10 ? oldBox : newBox} />}

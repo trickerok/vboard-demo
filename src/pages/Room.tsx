@@ -3,7 +3,8 @@ import { useParams } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
 import { Canvas } from '../components/Canvas';
 import { v4 as uuidv4 } from 'uuid';
-import { Share2, Check } from 'lucide-react';
+import { Share2, Check, Settings, Image as ImageIcon } from 'lucide-react';
+import { Settings2 } from 'lucide-react';
 
 export function Room() {
   const { roomId } = useParams<{ roomId: string }>();
@@ -11,6 +12,8 @@ export function Room() {
   const [isConnected, setIsConnected] = useState(false);
   const [bgPattern, setBgPattern] = useState<'none' | 'grid' | 'dots'>('grid');
   const [bgColor, setBgColor] = useState<'white' | 'paper' | 'gray'>('white');
+  const [gridSize, setGridSize] = useState(40);
+  const [showBgMenu, setShowBgMenu] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const [localUserId] = useState(() => uuidv4());
@@ -96,7 +99,7 @@ export function Room() {
 
       <main className="flex-1 relative overflow-hidden">
         {socket && roomId ? (
-          <Canvas socket={socket} roomId={roomId} bgPattern={bgPattern} bgColor={bgColor} localUserId={localUserId} localUserName={localUserName} localUserColor={localUserColor} />
+          <Canvas socket={socket} roomId={roomId} bgPattern={bgPattern} bgColor={bgColor} gridSize={gridSize} localUserId={localUserId} localUserName={localUserName} localUserColor={localUserColor} />
         ) : (
           <div className="flex h-full items-center justify-center bg-[#f8f9fa]">
             <p className="text-zinc-500 font-medium animate-pulse">Initializing workspace...</p>
