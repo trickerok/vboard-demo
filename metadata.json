@@ -1,0 +1,8 @@
+{
+  "name": "STEMBoard",
+  "description": "Real-time collaborative whiteboard for STEM education",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
