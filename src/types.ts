@@ -9,7 +9,8 @@ export type CanvasObject =
 export type CanvasEvent = 
   | { type: 'ADD_OBJECT'; object: CanvasObject }
   | { type: 'UPDATE_OBJECT'; id: string; changes: Partial<CanvasObject> }
-  | { type: 'DELETE_OBJECTS'; ids: string[] };
+  | { type: 'DELETE_OBJECTS'; ids: string[] }
+  | { type: 'UPDATE_MULTIPLE'; updates: Record<string, Partial<CanvasObject>> };
 
 declare global {
   interface Window {

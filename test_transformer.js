@@ -1,0 +1,11 @@
+import Konva from 'konva';
+const stage = new Konva.Stage({ container: document.createElement('div'), width: 500, height: 500 });
+const layer = new Konva.Layer();
+stage.add(layer);
+const circle = new Konva.Circle({ id: 'c1', x: 100, y: 100, radius: 50, fill: 'red' });
+layer.add(circle);
+const tr = new Konva.Transformer();
+layer.add(tr);
+tr.nodes([circle]);
+layer.draw();
+console.log(tr.width(), tr.height());

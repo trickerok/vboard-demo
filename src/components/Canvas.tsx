@@ -3,7 +3,7 @@ import { Stage, Layer, Rect, Path, Group, Line, Transformer, Circle as KonvaCirc
 import { v4 as uuidv4 } from 'uuid';
 import { Socket } from 'socket.io-client';
 import { CanvasObject, CanvasEvent } from '../types';
-import { MousePointer2, Hand, Pen, Square, Trash2, Eraser, Type, LassoSelect, Hexagon, Undo2, Redo2, Circle, Triangle, Download } from 'lucide-react';
+import { MousePointer2, Hand, Pen, Square, Trash2, Eraser, Type, LassoSelect, Hexagon, Undo2, Redo2, Circle, Triangle, Download, Settings2, Image as ImageIcon } from 'lucide-react';
 import jsPDF from 'jspdf';
 
 
@@ -24,15 +24,18 @@ import { getSvgPathFromStroke } from '../lib/freehand';
 import getStroke from 'perfect-freehand';
 import { TextNode } from './TextNode';
 import { db } from '../lib/firebase';
-import { collection, doc, setDoc, updateDoc, deleteDoc, getDocs } from 'firebase/firestore';
+import { collection, doc, setDoc, updateDoc, deleteDoc, getDocs, writeBatch } from 'firebase/firestore';
 import 'katex/dist/katex.min.css';
 
 interface CanvasProps {
   socket: Socket | null;
   roomId: string;
   bgPattern?: 'none' | 'grid' | 'dots';
+  setBgPattern?: (val: 'none' | 'grid' | 'dots') => void;
   bgColor?: 'white' | 'paper' | 'gray';
+  setBgColor?: (val: 'white' | 'paper' | 'gray') => void;
   gridSize?: number;
+  setGridSize?: (val: number) => void;
   localUserId: string;
   localUserName: string;
   localUserColor: string;
@@ -41,7 +44,8 @@ interface CanvasProps {
 const COLORS = ['#000000', '#ef4444', '#3b82f6', '#22c55e', '#eab308'];
 const SIZES = [4, 8, 12, 16];
 
-export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', gridSize = 40, localUserId, localUserName, localUserColor }: CanvasProps) {
+export function Canvas({ socket, roomId, bgPattern = 'grid', setBgPattern, bgColor = 'white', setBgColor, gridSize = 40, setGridSize, localUserId, localUserName, localUserColor }: CanvasProps) {
+  const [showMenu, setShowMenu] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const trRef = useRef<any>(null);
 
@@ -235,6 +239,8 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
         setObjects((prev) => prev.find((o) => o.id === event.object.id) ? prev : [...prev, event.object]);
       } else if (event.type === 'UPDATE_OBJECT') {
         setObjects((prev) => prev.map((obj) => (obj.id === event.id ? ({ ...obj, ...event.changes } as CanvasObject) : obj)));
+      } else if (event.type === 'UPDATE_MULTIPLE') {
+        setObjects(prev => prev.map(obj => event.updates[obj.id] ? { ...obj, ...event.updates[obj.id] } as CanvasObject : obj));
       } else if (event.type === 'DELETE_OBJECTS') {
         setObjects((prev) => prev.filter((obj) => !event.ids.includes(obj.id)));
         setSelectedIds((prev) => prev.filter(id => !event.ids.includes(id)));
@@ -249,14 +255,26 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
       socket.emit('canvas_event', { roomId, event });
     }
     if (persist) {
-      if (event.type === 'ADD_OBJECT') {
-        setDoc(doc(db, 'rooms', roomId, 'objects', event.object.id), event.object).catch(console.error);
-      } else if (event.type === 'UPDATE_OBJECT') {
-        updateDoc(doc(db, 'rooms', roomId, 'objects', event.id), event.changes).catch(console.error);
-      } else if (event.type === 'DELETE_OBJECTS') {
-        event.ids.forEach(id => {
-          deleteDoc(doc(db, 'rooms', roomId, 'objects', id)).catch(console.error);
-        });
+      try {
+        if (event.type === 'ADD_OBJECT') {
+          setDoc(doc(db, 'rooms', roomId, 'objects', event.object.id), event.object).catch(err => console.warn('Firebase persist error:', err.message));
+        } else if (event.type === 'UPDATE_OBJECT') {
+          updateDoc(doc(db, 'rooms', roomId, 'objects', event.id), event.changes).catch(err => console.warn('Firebase persist error:', err.message));
+        } else if (event.type === 'UPDATE_MULTIPLE') {
+          const batch = writeBatch(db);
+          Object.entries(event.updates).forEach(([id, changes]) => {
+            batch.update(doc(db, 'rooms', roomId, 'objects', id), changes);
+          });
+          batch.commit().catch(err => console.warn('Firebase batch update error:', err.message));
+        } else if (event.type === 'DELETE_OBJECTS') {
+          const batch = writeBatch(db);
+          event.ids.forEach(id => {
+            batch.delete(doc(db, 'rooms', roomId, 'objects', id));
+          });
+          batch.commit().catch(err => console.warn('Firebase batch delete error:', err.message));
+        }
+      } catch (err: any) {
+        console.warn('Firebase sync caught synchronous error:', err.message);
       }
     }
     
@@ -355,7 +373,7 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
         });
         setObjects(loadedObjects);
       } catch (err) {
-        console.error("Failed to load objects", err);
+        console.warn("Failed to load objects (likely rate limit). Ignoring. ", err);
       }
     };
     fetchObjects();
@@ -446,6 +464,21 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
       if (eraserMode === 'object') {
          performErase(pt);
       } else {
+         // Object eraser fallback for HTML text since it can't be pixel-erased
+         const idsToDelete = new Set<string>();
+         objects.forEach(obj => {
+            if (obj.type === 'text') {
+               if (pt.x >= obj.x && pt.x <= obj.x + 300 && pt.y >= obj.y && pt.y <= obj.y + 100) {
+                   idsToDelete.add(obj.id);
+               }
+            }
+         });
+         if (idsToDelete.size > 0) {
+            setObjects(prev => prev.filter(o => !idsToDelete.has(o.id)));
+            setSelectedIds(prev => prev.filter(id => !idsToDelete.has(id)));
+            emitEvent({ type: 'DELETE_OBJECTS', ids: Array.from(idsToDelete) });
+         }
+
          const pressure = e.evt.pressure ?? 0.5;
          drawingPoints.current = [[pt.x, pt.y]];
          if (drawingLineRef.current) {
@@ -608,6 +641,22 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
          drawingLineRef.current.setAttr('data', getSvgPathFromStroke(getStroke(drawingPoints.current, { size: brushSize, thinning: 0.5, smoothing: 0.5, streamline: 0.5 })));
          drawingLineRef.current.getLayer().batchDraw();
       }
+
+      // Also erase HTML text objects on contact since pixel erasing doesn't work on HTML
+      const idsToDelete = new Set<string>();
+      objects.forEach(obj => {
+         if (obj.type === 'text') {
+            if (pt.x >= obj.x && pt.x <= obj.x + 300 && pt.y >= obj.y && pt.y <= obj.y + 100) {
+                idsToDelete.add(obj.id);
+            }
+         }
+      });
+      if (idsToDelete.size > 0) {
+         setObjects(prev => prev.filter(o => !idsToDelete.has(o.id)));
+         setSelectedIds(prev => prev.filter(id => !idsToDelete.has(id)));
+         emitEvent({ type: 'DELETE_OBJECTS', ids: Array.from(idsToDelete) });
+      }
+
       return;
     }
 
@@ -692,9 +741,12 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
           } else if (obj.type === 'text') {
               cx = obj.x + (obj.width || 150) / 2;
               cy = obj.y + (obj.height || 50) / 2;
+          } else if (obj.type === 'circle' || obj.type === 'triangle' || (obj.type === 'polygon' && obj.radius)) {
+              cx = obj.x;
+              cy = obj.y;
           } else if (obj.type === 'path' || obj.type === 'polygon') {
               let _minX = Infinity, _maxX = -Infinity, _minY = Infinity, _maxY = -Infinity;
-              obj.points.forEach((p: any) => {
+              (obj.points || []).forEach((p: any) => {
                   let px = p.x !== undefined ? p.x : (Array.isArray(p) ? p[0] : p);
                   let py = p.y !== undefined ? p.y : (Array.isArray(p) ? p[1] : p);
                   if (px < _minX) _minX = px;
@@ -755,8 +807,8 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
 
   // Object Interactions
   const handleShapePointerDown = (e: any, id: string) => {
-
     if (tool === 'select' || tool === 'select-lasso') {
+      e.cancelBubble = true;
       if (e.evt.shiftKey) {
         setSelectedIds(prev => prev.includes(id) ? prev.filter(sid => sid !== id) : [...prev, id]);
       } else if (!selectedIds.includes(id)) {
@@ -825,12 +877,17 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
     node.scaleX(1);
     node.scaleY(1);
     
-    const changes = {
+    let changes: any = {
        x: node.x(),
        y: node.y(),
-       width: Math.max(5, (node.width() || 100) * scaleX),
-       height: Math.max(5, (node.height() || 100) * scaleY)
     };
+    const obj = objects.find(o => o.id === id);
+    if (obj && (obj.type === 'circle' || obj.type === 'triangle' || (obj.type === 'polygon' && obj.radius))) {
+       changes.radius = (obj.radius || 50) * Math.max(scaleX, scaleY);
+    } else {
+       changes.width = Math.max(5, (node.width() || 100) * scaleX);
+       changes.height = Math.max(5, (node.height() || 100) * scaleY);
+    }
     
     setObjects(prev => prev.map(o => o.id === id ? { ...o, ...changes } : o));
     emitEvent({ type: 'UPDATE_OBJECT', id, changes });
@@ -852,11 +909,13 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
       return o;
     }));
 
+    const updates: Record<string, any> = {};
     targetIds.forEach(targetId => {
       if (dragStartPos.current[targetId]) {
-        emitEvent({ type: 'UPDATE_OBJECT', id: targetId, changes: { x: dragStartPos.current[targetId].x + dx, y: dragStartPos.current[targetId].y + dy } });
+        updates[targetId] = { x: dragStartPos.current[targetId].x + dx, y: dragStartPos.current[targetId].y + dy };
       }
     });
+    if (Object.keys(updates).length > 0) emitEvent({ type: 'UPDATE_MULTIPLE', updates });
   };
 
   const getSelectionBoundingBox = () => {
@@ -1067,12 +1126,54 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
       </div>
       
       <div className="absolute top-4 right-4 z-50 flex flex-col gap-2 pointer-events-auto items-end">
-         <div className="flex items-center gap-1 p-1 bg-white rounded-xl shadow-md border border-zinc-200">
-           <button onClick={exportToJPG} className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium text-zinc-600 hover:bg-zinc-100" title="Export JPG"><Download size={16} /> JPG</button>
-           <div className="w-px h-4 bg-zinc-200" />
-           <button onClick={exportToPDF} className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium text-zinc-600 hover:bg-zinc-100" title="Export PDF"><Download size={16} /> PDF</button>
+         <div className="relative">
+           <button 
+             onClick={() => setShowMenu(!showMenu)} 
+             className="flex items-center gap-2 px-3 py-1.5 bg-white rounded-xl shadow-md border border-zinc-200 transition-colors text-sm font-medium text-zinc-600 hover:bg-zinc-100" 
+             title="Menu">
+             <Settings2 size={16} /> Menu
+           </button>
+           
+           {showMenu && (
+             <div className="absolute right-0 top-full mt-2 w-64 bg-white rounded-xl shadow-xl border border-zinc-200 p-4 flex flex-col gap-4">
+               <div className="flex flex-col gap-2">
+                 <h3 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Canvas Background</h3>
+                 <div className="flex items-center gap-2">
+                   <select value={bgPattern} onChange={(e) => setBgPattern?.(e.target.value as any)} className="flex-1 bg-zinc-50 border border-zinc-200 rounded-lg px-2 py-1 text-sm font-medium text-zinc-600 outline-none cursor-pointer">
+                     <option value="none">Blank</option>
+                     <option value="grid">Grid</option>
+                     <option value="dots">Dots</option>
+                   </select>
+                   <select value={bgColor} onChange={(e) => setBgColor?.(e.target.value as any)} className="flex-1 bg-zinc-50 border border-zinc-200 rounded-lg px-2 py-1 text-sm font-medium text-zinc-600 outline-none cursor-pointer">
+                     <option value="white">White</option>
+                     <option value="paper">Paper</option>
+                     <option value="gray">Gray</option>
+                   </select>
+                 </div>
+               </div>
+               
+               {bgPattern !== 'none' && (
+                 <div className="flex flex-col gap-1">
+                   <div className="flex justify-between items-center">
+                     <label className="text-sm font-medium text-zinc-600">Grid Scale</label>
+                     <span className="text-xs text-zinc-400">{gridSize}px</span>
+                   </div>
+                   <input type="range" min="10" max="100" value={gridSize} onChange={(e) => setGridSize?.(parseInt(e.target.value))} className="w-full accent-indigo-500" />
+                 </div>
+               )}
+               
+               <div className="w-full h-px bg-zinc-200" />
+               
+               <div className="flex flex-col gap-2">
+                 <h3 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Export</h3>
+                 <div className="flex items-center gap-2">
+                   <button onClick={() => { exportToJPG(); setShowMenu(false); }} className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-50 border border-zinc-200 transition-colors text-sm font-medium text-zinc-600 hover:bg-zinc-100"><ImageIcon size={16} /> JPG</button>
+                   <button onClick={() => { exportToPDF(); setShowMenu(false); }} className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-50 border border-zinc-200 transition-colors text-sm font-medium text-zinc-600 hover:bg-zinc-100"><Download size={16} /> PDF</button>
+                 </div>
+               </div>
+             </div>
+           )}
          </div>
-
       </div>
       <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 pointer-events-auto">
         <div className="flex items-center gap-1 p-1 bg-white rounded-xl shadow-md border border-zinc-200">
@@ -1100,13 +1201,13 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
                </div>
             )}
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider ml-1 mr-1">Fill:</span>
+              <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider ml-1 mr-1">{tool === 'draw' ? 'Color:' : 'Fill:'}</span>
               {COLORS.map(c => (
                 <button key={c} onClick={() => {
                   setBrushColor(c);
                   if (selectedIds.length > 0) {
                     setObjects(prev => prev.map(o => selectedIds.includes(o.id) ? { ...o, fill: c } : o));
-                    selectedIds.forEach(id => emitEvent({ type: 'UPDATE_OBJECT', id, changes: { fill: c } }));
+                    const updates: Record<string, any> = {}; selectedIds.forEach(id => updates[id] = { fill: c }); emitEvent({ type: 'UPDATE_MULTIPLE', updates });
                   }
                 }} className={cn("w-6 h-6 rounded-full border-2 transition-transform", brushColor === c ? "border-indigo-500 scale-125" : "border-zinc-300 hover:scale-110")} style={{ backgroundColor: c }} />
               ))}
@@ -1117,7 +1218,7 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
                     setBrushColor(c);
                     if (selectedIds.length > 0) {
                       setObjects(prev => prev.map(o => selectedIds.includes(o.id) ? { ...o, fill: c } : o));
-                      selectedIds.forEach(id => emitEvent({ type: 'UPDATE_OBJECT', id, changes: { fill: c } }));
+                      const updates: Record<string, any> = {}; selectedIds.forEach(id => updates[id] = { fill: c }); emitEvent({ type: 'UPDATE_MULTIPLE', updates });
                     }
                  }} className="absolute inset-[-10px] w-10 h-10 opacity-0 cursor-pointer" title="Custom Color" />
               </div>
@@ -1132,7 +1233,7 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
                       setStrokeColor('transparent');
                       if (selectedIds.length > 0) {
                         setObjects(prev => prev.map(o => selectedIds.includes(o.id) ? { ...o, stroke: 'transparent', strokeWidth: 0 } : o));
-                        selectedIds.forEach(id => emitEvent({ type: 'UPDATE_OBJECT', id, changes: { stroke: 'transparent', strokeWidth: 0 } }));
+                        const updates: Record<string, any> = {}; selectedIds.forEach(id => updates[id] = { stroke: 'transparent', strokeWidth: 0 }); emitEvent({ type: 'UPDATE_MULTIPLE', updates });
                       }
                     }} 
                     className={cn("w-6 h-6 rounded-full border-2 transition-transform relative overflow-hidden", strokeColor === 'transparent' ? "border-indigo-500 scale-125" : "border-zinc-300 hover:scale-110")} 
@@ -1145,7 +1246,7 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
                       setStrokeColor(c);
                       if (selectedIds.length > 0) {
                         setObjects(prev => prev.map(o => selectedIds.includes(o.id) ? { ...o, stroke: c, strokeWidth: 4 } : o));
-                        selectedIds.forEach(id => emitEvent({ type: 'UPDATE_OBJECT', id, changes: { stroke: c, strokeWidth: 4 } }));
+                        const updates: Record<string, any> = {}; selectedIds.forEach(id => updates[id] = { stroke: c, strokeWidth: 4 }); emitEvent({ type: 'UPDATE_MULTIPLE', updates });
                       }
                     }} className={cn("w-6 h-6 rounded-full border-2 transition-transform", strokeColor === c ? "border-indigo-500 scale-125" : "border-zinc-300 hover:scale-110")} style={{ backgroundColor: c }} />
                   ))}
@@ -1155,7 +1256,7 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
                         setStrokeColor(c);
                         if (selectedIds.length > 0) {
                           setObjects(prev => prev.map(o => selectedIds.includes(o.id) ? { ...o, stroke: c, strokeWidth: 4 } : o));
-                          selectedIds.forEach(id => emitEvent({ type: 'UPDATE_OBJECT', id, changes: { stroke: c, strokeWidth: 4 } }));
+                          const updates: Record<string, any> = {}; selectedIds.forEach(id => updates[id] = { stroke: c, strokeWidth: 4 }); emitEvent({ type: 'UPDATE_MULTIPLE', updates });
                         }
                      }} className="absolute inset-[-10px] w-10 h-10 opacity-0 cursor-pointer" title="Custom Stroke Color" />
                   </div>
@@ -1222,42 +1323,42 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
               if (obj.type === 'rect') {
                 const isSelected = selectedIds.includes(obj.id);
                 return (
-                  <Rect key={obj.id} id={obj.id} x={obj.x} y={obj.y} width={obj.width} height={obj.height} fill={obj.fill} cornerRadius={8} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} onTransformEnd={handleTransformEnd} shadowColor={isSelected ? "#6366f1" : "rgba(0,0,0,0.15)"} shadowBlur={isSelected ? 10 : 15} shadowOffsetY={isSelected ? 0 : 5} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 0} />
+                  <Rect key={obj.id} id={obj.id} x={obj.x} y={obj.y} width={obj.width} height={obj.height} fill={obj.fill} cornerRadius={8} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onMouseDown={(e) => handleShapePointerDown(e, obj.id)} onTouchStart={(e) => handleShapePointerDown(e, obj.id)} onClick={(e) => handleShapePointerDown(e, obj.id)} onTap={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} onTransformEnd={handleTransformEnd} shadowColor={isSelected ? "#6366f1" : "rgba(0,0,0,0.15)"} shadowBlur={isSelected ? 10 : 15} shadowOffsetY={isSelected ? 0 : 5} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 0} />
                 );
               } else if (obj.type === 'circle') {
                 const isSelected = selectedIds.includes(obj.id);
                 return (
-                  <KonvaCircle key={obj.id} id={obj.id} x={obj.x} y={obj.y} radius={obj.radius} fill={obj.fill} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} shadowColor={isSelected ? "#6366f1" : "rgba(0,0,0,0.15)"} shadowBlur={isSelected ? 10 : 15} shadowOffsetY={isSelected ? 0 : 5} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 0} />
+                  <KonvaCircle key={obj.id} id={obj.id} x={obj.x} y={obj.y} radius={obj.radius} fill={obj.fill} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onMouseDown={(e) => handleShapePointerDown(e, obj.id)} onTouchStart={(e) => handleShapePointerDown(e, obj.id)} onClick={(e) => handleShapePointerDown(e, obj.id)} onTap={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} shadowColor={isSelected ? "#6366f1" : "rgba(0,0,0,0.15)"} shadowBlur={isSelected ? 10 : 15} shadowOffsetY={isSelected ? 0 : 5} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 0} onTransformEnd={handleTransformEnd} />
                 );
               } else if (obj.type === 'triangle') {
                 const isSelected = selectedIds.includes(obj.id);
                 return (
-                  <RegularPolygon key={obj.id} id={obj.id} sides={3} x={obj.x} y={obj.y} radius={obj.radius} fill={obj.fill} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} shadowColor={isSelected ? "#6366f1" : "rgba(0,0,0,0.15)"} shadowBlur={isSelected ? 10 : 15} shadowOffsetY={isSelected ? 0 : 5} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 0} />
+                  <RegularPolygon key={obj.id} id={obj.id} sides={3} x={obj.x} y={obj.y} radius={obj.radius} fill={obj.fill} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onMouseDown={(e) => handleShapePointerDown(e, obj.id)} onTouchStart={(e) => handleShapePointerDown(e, obj.id)} onClick={(e) => handleShapePointerDown(e, obj.id)} onTap={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} shadowColor={isSelected ? "#6366f1" : "rgba(0,0,0,0.15)"} shadowBlur={isSelected ? 10 : 15} shadowOffsetY={isSelected ? 0 : 5} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 0} onTransformEnd={handleTransformEnd} />
                 );
               } else if (obj.type === 'path') {
                 const isSelected = selectedIds.includes(obj.id);
                 const pts = obj.points.map(pt => [pt.x, pt.y, pt.p]);
                 const pathData = getSvgPathFromStroke(getStroke(pts, { size: obj.size || 6, thinning: 0.5, smoothing: 0.5, streamline: 0.5 }));
                 return (
-                  <Path key={obj.id} id={obj.id} x={obj.x} y={obj.y} data={pathData} fill={obj.fill} hitStrokeWidth={20} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} shadowColor={isSelected ? "#6366f1" : "transparent"} shadowBlur={isSelected ? 10 : 0} globalCompositeOperation={obj.isEraser ? 'destination-out' : 'source-over'} />
+                  <Path key={obj.id} id={obj.id} x={obj.x} y={obj.y} data={pathData} fill={obj.fill} hitStrokeWidth={20} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onMouseDown={(e) => handleShapePointerDown(e, obj.id)} onTouchStart={(e) => handleShapePointerDown(e, obj.id)} onClick={(e) => handleShapePointerDown(e, obj.id)} onTap={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} shadowColor={isSelected ? "#6366f1" : "transparent"} shadowBlur={isSelected ? 10 : 0} globalCompositeOperation={obj.isEraser ? 'destination-out' : 'source-over'} />
                 );
               } else if (obj.type === 'polygon') {
                 const isSelected = selectedIds.includes(obj.id);
                 // We changed polygon to just be a RegularPolygon with 6 sides instead of a custom Line if it has a radius.
                 if (obj.radius) {
                    return (
-                     <RegularPolygon key={obj.id} id={obj.id} sides={obj.sides || 6} x={obj.x} y={obj.y} radius={obj.radius} fill={obj.fill} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} shadowColor={isSelected ? "#6366f1" : "rgba(0,0,0,0.15)"} shadowBlur={isSelected ? 10 : 15} shadowOffsetY={isSelected ? 0 : 5} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 0} />
+                     <RegularPolygon key={obj.id} id={obj.id} sides={obj.sides || 6} x={obj.x} y={obj.y} radius={obj.radius} fill={obj.fill} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onMouseDown={(e) => handleShapePointerDown(e, obj.id)} onTouchStart={(e) => handleShapePointerDown(e, obj.id)} onClick={(e) => handleShapePointerDown(e, obj.id)} onTap={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} shadowColor={isSelected ? "#6366f1" : "rgba(0,0,0,0.15)"} shadowBlur={isSelected ? 10 : 15} shadowOffsetY={isSelected ? 0 : 5} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 0} onTransformEnd={handleTransformEnd} />
                    );
                 } else {
                    return (
-                     <Line key={obj.id} id={obj.id} x={obj.x} y={obj.y} points={obj.points} fill={obj.fill} closed={true} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} onTransformEnd={handleTransformEnd} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 4} shadowColor={isSelected ? "#6366f1" : "transparent"} shadowBlur={isSelected ? 10 : 0} />
+                     <Line key={obj.id} id={obj.id} x={obj.x} y={obj.y} points={obj.points} fill={obj.fill} closed={true} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onMouseDown={(e) => handleShapePointerDown(e, obj.id)} onTouchStart={(e) => handleShapePointerDown(e, obj.id)} onClick={(e) => handleShapePointerDown(e, obj.id)} onTap={(e) => handleShapePointerDown(e, obj.id)} onPointerEnter={(e) => handleShapePointerEnter(e, obj.id)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)} onTransformEnd={handleTransformEnd} stroke={obj.stroke || "transparent"} strokeWidth={obj.strokeWidth || 4} shadowColor={isSelected ? "#6366f1" : "transparent"} shadowBlur={isSelected ? 10 : 0} />
                    );
                 }
               } else if (obj.type === 'text') {
                 const isSelected = selectedIds.includes(obj.id);
                 const isEditing = editingId === obj.id;
                 return (
-                  <Group key={obj.id} id={obj.id} x={obj.x} y={obj.y} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onDblClick={(e) => handleShapeDblClick(e, obj.id, obj.type)} onDblTap={(e) => handleShapeDblClick(e, obj.id, obj.type)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)}>
+                  <Group key={obj.id} id={obj.id} x={obj.x} y={obj.y} draggable={tool === 'select' || tool === 'select-lasso'} onPointerDown={(e) => handleShapePointerDown(e, obj.id)} onMouseDown={(e) => handleShapePointerDown(e, obj.id)} onTouchStart={(e) => handleShapePointerDown(e, obj.id)} onClick={(e) => handleShapePointerDown(e, obj.id)} onTap={(e) => handleShapePointerDown(e, obj.id)} onDblClick={(e) => handleShapeDblClick(e, obj.id, obj.type)} onDblTap={(e) => handleShapeDblClick(e, obj.id, obj.type)} onDragStart={(e) => handleDragStart(e, obj.id)} onDragMove={(e) => handleDragMove(e, obj.id)} onDragEnd={(e) => handleDragEnd(e, obj.id)}>
                     <Rect x={0} y={0} width={300} height={100} fill="transparent" stroke={isSelected ? "#6366f1" : "transparent"} strokeWidth={2} shadowColor="transparent" shadowBlur={0} cornerRadius={8} />
                     <Html transform={true} divProps={{ style: { pointerEvents: isEditing ? 'auto' : 'none' } }}>
                       <div onPointerDown={isEditing ? (e) => e.stopPropagation() : undefined} style={{ width: 300 }}>
@@ -1298,7 +1399,7 @@ export function Canvas({ socket, roomId, bgPattern = 'grid', bgColor = 'white', 
             
             {/* Native Lasso Line */}
             <Line ref={lassoLineRef} stroke="#6366f1" strokeWidth={1} fill="rgba(99, 102, 241, 0.1)" closed={true} visible={false} listening={false} points={[]} />
-            {selectedBBox && (tool === 'select' || tool === 'select-lasso') && selectedIds.length > 0 && (
+            {selectedBBox && (tool === 'select' || tool === 'select-lasso') && selectedIds.length > 1 && (
               <Rect
                 x={selectedBBox.x}
                 y={selectedBBox.y}
